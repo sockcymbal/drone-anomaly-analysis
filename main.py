@@ -1,10 +1,17 @@
 # ============================  main.py  ============================
 """
-Drone-Anomaly Demo • tuned for dedrone_kepler_clean.csv
-• Uses columns: lat, lng, ts, PilotLatitude, PilotLongitude,
-                speed_mps, turn_rate_deg_s, pilot_dist_m, drone_id
-• Five-test vote (distance, speed, heading-rate, burst, cluster outlier)
-• LLM summaries via OpenAI o3  (temperature = 1)
+Drone Anomaly Detection System
+
+A comprehensive platform for analyzing drone telemetry data and identifying potential security threats.
+
+Key components:
+• Data processing: Works with dedrone_kepler_clean.csv format
+• Required columns: lat, lng, ts, PilotLatitude, PilotLongitude, speed_mps, turn_rate_deg_s, pilot_dist_m, drone_id
+• Multi-dimensional anomaly detection: Six specialized tests (distance, speed, turn rate, burst detection,
+  cluster anomaly detection, and isolation forest machine learning)
+• AI-powered analysis: Utilizes OpenAI's o3 model (with temperature=1 for creative responses)
+• Interactive visualization: Web interface with mapping and follow-up question capability
+• Threat prioritization: 1-5 priority scale with detailed threat assessment and recommended actions
 """
 
 # ─── Standard libs ───────────────────────────────────────────────
@@ -34,9 +41,20 @@ app = FastAPI(title="Drone-Anomaly Demo + o3")
 # Helpers
 # ================================================================
 def great_circle(lon1, lat1, lon2, lat2):
-    geod = pyproj.Geod(ellps="WGS84")
-    _, _, d = geod.inv(lon1, lat1, lon2, lat2)
-    return d                   # metres
+    """Calculate the great-circle distance between two points on Earth's surface.
+    
+    Args:
+        lon1 (float): Longitude of first point in degrees
+        lat1 (float): Latitude of first point in degrees
+        lon2 (float): Longitude of second point in degrees
+        lat2 (float): Latitude of second point in degrees
+        
+    Returns:
+        float: Distance between the points in meters using WGS84 ellipsoid model
+    """
+    geod = pyproj.Geod(ellps="WGS84")  # Use WGS84 ellipsoid for Earth's shape
+    _, _, d = geod.inv(lon1, lat1, lon2, lat2)  # Calculate inverse geodesic
+    return d  # Returns distance in meters
 
 
 def brief_llm(drone_id: str, row: pd.Series) -> dict:
@@ -122,9 +140,24 @@ def qa_llm(context_json: str, question: str) -> str:
 # Core analysis
 # ================================================================
 def analyse(df_raw: pd.DataFrame):
-    # ── column normalise ─────────────────────
-    df_raw.columns = df_raw.columns.str.lower()
-    df = df_raw.rename(columns={
+    """Perform comprehensive anomaly detection analysis on drone telemetry data.
+    
+    This function processes raw telemetry data through multiple detection algorithms to identify
+    suspicious drone behavior, calculates anomaly scores, and generates AI-powered threat assessments.
+    
+    Args:
+        df_raw (pd.DataFrame): Raw drone telemetry data from CSV upload
+        
+    Returns:
+        tuple: (processed_dataframe, threat_briefs, context_json, map_html)
+            - processed_dataframe: DataFrame with all calculations and anomaly flags
+            - threat_briefs: List of AI-assessed threat summaries for highest-priority drones
+            - context_json: JSON string of threat summaries for follow-up questions
+            - map_html: HTML for interactive map visualization of drone paths
+    """
+    # ── Normalize column names for consistent processing ─────────────────────
+    df_raw.columns = df_raw.columns.str.lower()  # Convert all column names to lowercase
+    df = df_raw.rename(columns={  # Standardize column names across different data sources
         "dronelatitude":"lat",
         "dronelongitude":"lng",
         "detectiontime":"ts",
@@ -132,64 +165,132 @@ def analyse(df_raw: pd.DataFrame):
         "pilotlongitude":"pilot_lon",
         "serialnumber":"drone_id"
     })
+    # ── Validate required columns and clean data ─────────────────────
+    # Check for required columns - will raise an error if any are missing
     for need in ["lat","lng","ts","pilot_lat","pilot_lon",
                  "speed_mps","turn_rate_deg_s","pilot_dist_m","drone_id"]:
         if need not in df.columns:
             raise ValueError(f"Missing column: {need}")
+            
+    # Convert timestamp strings to datetime objects with UTC timezone
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
+    
+    # Remove rows with missing values in essential columns
     df = df.dropna(subset=["lat","lng","ts","pilot_lat","pilot_lon",
                            "speed_mps","turn_rate_deg_s","pilot_dist_m"])
+    
+    # Sort data by drone ID and timestamp for proper sequential analysis
     df = df.sort_values(["drone_id","ts"])
 
-    # ── extra features per drone ─────────────
-    minis=[]
-    for did, g in df.groupby("drone_id"):
-        g=g.copy()
+    # ── Calculate derived features for each drone separately ─────────────
+    minis=[]  # List to store processed dataframes for each drone
+    for did, g in df.groupby("drone_id"):  # Process each drone separately
+        g=g.copy()  # Create a copy to avoid SettingWithCopyWarning
+        
+        # Calculate time difference between consecutive points in seconds
         g["dt"] = g["ts"].diff().dt.total_seconds().fillna(0)
+        
+        # Calculate change in distance to pilot between consecutive points
         g["dist_change"] = g["pilot_dist_m"].diff().fillna(0)
+        
+        # Calculate rate of distance change (negative means approaching pilot)
         g["dist_rate"] = g["dist_change"]/g["dt"].replace(0,np.nan)
-        # heading rate
+        
+        # Calculate bearing (angle) from pilot to drone
         bearing = np.degrees(np.arctan2(g["lng"]-g["pilot_lon"],
-                                        g["lat"]-g["pilot_lat"]))
+                                         g["lat"]-g["pilot_lat"]))
+        
+        # Calculate change in bearing (normalized to -180 to 180 degrees)
         bearing_diff = (bearing.diff().fillna(0)+180)%360 - 180
+        
+        # Calculate rate of bearing change (indicates turning behavior)
         g["bearing_rate"] = bearing_diff/g["dt"].replace(0,np.nan)
+        
+        # Replace NaN values with 0 for rate calculations
         g.fillna({"dist_rate":0,"bearing_rate":0}, inplace=True)
-        minis.append(g)
+        
+        minis.append(g)  # Add processed drone data to list
+    
+    # Combine all drone dataframes back into one
     df = pd.concat(minis)
 
-    # ── robust z for distance ────────────────
-    med = df.pilot_dist_m.median()
-    mad = median_abs_deviation(df.pilot_dist_m, nan_policy="omit")
+    # ── Calculate robust z-score for distance (outlier detection) ────────────────
+    # Use median and median absolute deviation for robustness against extreme values
+    med = df.pilot_dist_m.median()  # Median is less affected by outliers than mean
+    mad = median_abs_deviation(df.pilot_dist_m, nan_policy="omit")  # Robust measure of dispersion
+    
+    # Calculate robust z-score: values > 3 or < -3 are typically considered outliers
+    # 1.4826 factor makes MAD consistent with standard deviation for normal distributions
     df["z_dist"] = (df.pilot_dist_m-med)/(1.4826*mad)
 
-    # ── anomaly tests ────────────────────────
-    df["dist_fail"]   = df.pilot_dist_m > 2000
-    df["speed_fail"]  = df.speed_mps > 50
-    df["turn_fail"]   = df.turn_rate_deg_s.abs() > 90
-    # burst flag
+    # ── Apply primary anomaly detection tests ────────────────────────
+    # Test 1: Distance - Flag drones operating beyond 2000m (likely beyond visual line of sight)
+    df["dist_fail"] = df.pilot_dist_m > 2000
+    
+    # Test 2: Speed - Flag drones exceeding 50 m/s (~180 km/h, beyond typical consumer capabilities)
+    df["speed_fail"] = df.speed_mps > 50
+    
+    # Test 3: Turn rate - Flag extreme maneuvers exceeding 90 degrees/second
+    df["turn_fail"] = df.turn_rate_deg_s.abs() > 90
+    # ── Test 4: Burst detection (sudden changes in distance pattern) ────────────
+    # Initialize burst flag column
     df["burst"] = False
+    
+    # Process each drone separately for change point detection
     for did,g in df.groupby("drone_id"):
+        # Skip drones with too few data points
         if len(g)<6: continue
+        
+        # Use kernel change point detection to find sudden changes in distance pattern
+        # This identifies abrupt shifts that could indicate evasive maneuvers or automated waypoints
         cps = ruptures.KernelCPD(kernel="linear").fit(g.pilot_dist_m.values).predict(2)[:-1]
+        
+        # Mark detected change points as True in the burst column
         df.loc[g.iloc[cps].index,"burst"]=True
-    # cluster outlier
+    # ── Test 5: Clustering-based anomaly detection ────────────
+    # Select features for multivariate anomaly detection
     feats = df[["speed_mps","turn_rate_deg_s","pilot_dist_m"]]
+    
+    # Standardize features to give equal weight (mean=0, std=1)
     scaled = StandardScaler().fit_transform(feats)
+    
+    # Apply HDBSCAN clustering algorithm to identify outliers
+    # Points labeled as -1 are considered noise/outliers not belonging to any cluster
+    # min_cluster_size=10: minimum points to form a cluster
+    # min_samples=5: minimum points in neighborhood to form core points
     df["clu_noise"] = hdbscan.HDBSCAN(min_cluster_size=10,min_samples=5)\
                          .fit_predict(scaled) == -1
-    # isolate forest (adds weight)
+    # ── Test 6: Machine learning-based anomaly detection with Isolation Forest ────────────
+    # Isolation Forest works by isolating observations through recursive partitioning
+    # Anomalies require fewer partitions to isolate, resulting in shorter path lengths
+    
+    # Set contamination=0.05 expects approximately 5% of the data to be anomalous
+    # random_state=42 ensures reproducible results
     iso = IsolationForest(contamination=0.05, random_state=42).fit(feats)
+    
+    # Flag points with decision function < -0.15 as anomalies
+    # The decision function returns the negative average path length
+    # More negative values indicate stronger anomalies
     df["iso_flag"] = iso.decision_function(feats) < -0.15
 
+    # ── Calculate composite anomaly score by summing test results ────────────
+    # Combine results from all detection methods into a single voting score
     test_cols = ["dist_fail","speed_fail","turn_fail","burst","clu_noise"]
+    
+    # Sum all boolean flags (True=1, False=0) plus the isolation forest flag
+    # Higher vote counts indicate more anomalous behavior detected by multiple methods
     df["votes"] = df[test_cols].sum(axis=1) + df.iso_flag.astype(int)
 
-    # ── worst row per drone ───────────────────
+    # ── Identify most anomalous point for each drone ───────────────────
+    # For each drone, find the row with the highest anomaly score (votes)
+    # Then select the top 5 drones with the highest maximum anomaly scores
     worst = df.loc[df.groupby("drone_id").votes.idxmax()].nlargest(5,"votes")
 
-    # ── LLM briefs ────────────────────────────
+    # ── Generate AI-powered threat assessments for top anomalous drones ────────────
+    # For each of the top anomalous drones, generate a detailed threat assessment using LLM
     briefs=[]
     for _,r in worst.iterrows():
+        # Call OpenAI API to get detailed analysis of the drone's behavior
         b = brief_llm(r.drone_id,r)
         briefs.append({
             "id": r.drone_id,
@@ -210,15 +311,26 @@ def analyse(df_raw: pd.DataFrame):
 
     ctx_json = json.dumps(briefs, default=str, indent=2)
 
-    # ── minimal map ───────────────────────────
+    # ── Generate interactive map visualization of anomalous drone paths ───────────
     map_html=""
     if briefs:
+        # Extract drone IDs from the briefs list
         ids=[b["id"] for b in briefs]
+        
+        # Filter data to only include the identified anomalous drones
         dplot=df[df.drone_id.isin(ids)]
+        
+        # Create interactive map using Plotly Express
+        # - Points colored by anomaly score (votes)
+        # - Hover shows drone ID
+        # - Uses OpenStreetMap as base layer
         fig=px.scatter_mapbox(dplot, lat="lat", lon="lng",
                               color=dplot.votes.astype(str),
                               hover_name="drone_id",
                               mapbox_style="open-street-map",zoom=10)
+        
+        # Convert plot to HTML for embedding in web response
+        # Use CDN for plotly.js to reduce response size
         map_html=fig.to_html(full_html=False, include_plotlyjs='cdn')
 
     return df, briefs, ctx_json, map_html
@@ -230,6 +342,20 @@ cache = {}
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
+    """Process uploaded drone telemetry CSV file and return analysis results.
+    
+    This endpoint handles the file upload, processes the data through the analysis pipeline,
+    and returns a formatted HTML response with visualization and interactive elements.
+    
+    Args:
+        file (UploadFile): The uploaded CSV file containing drone telemetry data
+        
+    Returns:
+        HTMLResponse: Rendered HTML page with analysis results, visualization, and chat interface
+        
+    Raises:
+        HTTPException: If file processing or analysis fails
+    """
     try:
         df_raw = pd.read_csv(BytesIO(await file.read()))
         df, briefs, ctx, map_html = analyse(df_raw)
@@ -399,6 +525,20 @@ async def analyze(file: UploadFile = File(...)):
 
 @app.post("/ask")
 async def ask(req: Request):
+    """Handle follow-up questions about the drone anomaly analysis.
+    
+    This endpoint receives natural language questions from the user interface,
+    passes them to the LLM along with the analysis context, and returns the AI response.
+    
+    Args:
+        req (Request): FastAPI request object containing the question JSON
+        
+    Returns:
+        JSONResponse: Contains the answer to the user's question
+        
+    Raises:
+        HTTPException: If question processing fails or no analysis data is available
+    """
     q=(await req.json()).get("question","")
     if not q: return JSONResponse({"error":"no question"},400)
     if "ctx" not in cache: return JSONResponse({"error":"run analysis first"},400)
@@ -406,7 +546,18 @@ async def ask(req: Request):
     return JSONResponse({"answer":ans})
 
 @app.get("/download")
-def download():
+async def download():
+    """Provide the annotated CSV file with analysis results for download.
+    
+    This endpoint returns the processed CSV file that includes all anomaly detection flags,
+    calculated features, and anomaly scores for further analysis in external tools.
+    
+    Returns:
+        FileResponse: The annotated CSV file with analysis results
+        
+    Raises:
+        HTTPException: If no analysis has been performed yet
+    """
     path = cache.get("csv")
     if not path: return HTMLResponse("No CSV",404)
     return FileResponse(path, filename="annotated.csv")
@@ -764,6 +915,28 @@ def home():
 
 @app.get("/analyze")
 def analyze():
+    """
+    Renders the main application interface for the Drone Anomaly Detection System.
+    
+    This endpoint serves the static HTML landing page that includes:
+    - File upload functionality for drone telemetry data
+    - Chat interface for AI-powered follow-up questions
+    - System features overview and documentation links
+    - Clear UI elements for user interaction
+    
+    Returns:
+        HTMLResponse: Fully-rendered HTML page with embedded CSS and JavaScript
+    """
+    
+    This endpoint serves the static HTML page that includes:
+    - File upload functionality for drone telemetry data
+    - Chat interface for AI-powered follow-up questions
+    - System features overview
+    - Interactive UI elements for user interaction
+    
+    Returns:
+        HTMLResponse: Fully-rendered HTML page with embedded CSS and JavaScript
+    """
     return HTMLResponse("""
     <!DOCTYPE html>
     <html>
@@ -971,5 +1144,6 @@ def analyze():
     </html>
     """)
 
-# uvicorn main:app --reload  (port defaults to 8000; change if needed)
-# =================================================================
+# Run the FastAPI application with: uvicorn main:app --reload
+# The server will listen on port 8000 by default, which can be changed via command line parameters
+# ================================================================= End of analyze function
