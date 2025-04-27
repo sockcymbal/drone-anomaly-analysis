@@ -255,8 +255,8 @@ async def analyze(file: UploadFile = File(...)):
         </div>''' for b in briefs
     )
     
-    # Create the complete HTML with styling
-    html = f'''
+    # Create the HTML with styling - separating the script part to avoid f-string issues
+    html_content = f'''
     <html>
     <head>
         <title>Drone Anomaly Analysis</title>
@@ -296,6 +296,15 @@ async def analyze(file: UploadFile = File(...)):
             .back-btn {{background-color: #95a5a6; color: white;}}
             .back-btn:hover {{background-color: #7f8c8d;}}
             .map-container {{margin: 30px 0; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1);}}
+            
+            /* Chat section styling */
+            .chat-section {{background-color: white; border-radius: 8px; padding: 25px; margin: 30px 0; box-shadow: 0 2px 10px rgba(0,0,0,0.1);}}
+            #q {{width: 100%; padding: 12px; border: 1px solid #dce4ec; border-radius: 4px; font-size: 16px; margin-bottom: 10px;}}
+            #log {{background-color: #f8f9fa; border: 1px solid #dce4ec; border-radius: 4px; padding: 15px; height: 300px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; word-wrap: break-word; margin-top: 15px;}}
+            .user-message {{color: #2c3e50; margin-bottom: 10px;}}
+            .ai-message {{color: #27ae60; margin-bottom: 15px; border-left: 3px solid #27ae60; padding-left: 10px;}}
+            button {{background-color: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background-color 0.3s;}}
+            button:hover {{background-color: #2980b9;}}
         </style>
     </head>
     <body>
@@ -310,14 +319,69 @@ async def analyze(file: UploadFile = File(...)):
                 {map_html}
             </div>
             
+            <div class="chat-section">
+                <h2><i class="fas fa-comments"></i> Ask Follow-up Questions</h2>
+                <p>Ask questions about the analysis results to get AI-powered insights.</p>
+                <form id="chat" onsubmit="send(); return false;">
+                    <input id="q" placeholder="e.g., Which drone poses the highest threat and why?" autocomplete="off">
+                    <button type="submit"><i class="fas fa-paper-plane"></i> Ask</button>
+                </form>
+                <div id="log"></div>
+            </div>
+            
             <div class="action-buttons">
                 <a href="/download" class="download-btn"><i class="fas fa-download"></i> Download Annotated CSV</a>
                 <a href="/" class="back-btn"><i class="fas fa-arrow-left"></i> Back to Home</a>
             </div>
         </div>
+    '''
+    
+    # Add JavaScript separately (not in f-string)
+    script_part = '''
+        
+    <script>
+        async function send(){
+            const txt=document.getElementById('q').value;
+            document.getElementById('q').value='';
+            if(!txt) return;
+            const log=document.getElementById('log');
+            
+            // Add user message with styling
+            const userDiv = document.createElement('div');
+            userDiv.className = 'user-message';
+            userDiv.innerHTML = '<strong>You:</strong> ' + txt;
+            log.appendChild(userDiv);
+            
+            // Show loading indicator
+            const loadingDiv = document.createElement('div');
+            loadingDiv.className = 'ai-message';
+            loadingDiv.innerHTML = '<strong>AI:</strong> <em>Thinking...</em>';
+            log.appendChild(loadingDiv);
+            
+            try {
+                const res = await fetch('/ask', {
+                    method: 'POST',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({question: txt})
+                });
+                
+                const data = await res.json();
+                
+                // Replace loading indicator with actual response
+                loadingDiv.innerHTML = '<strong>AI:</strong> ' + data.answer;
+            } catch (error) {
+                loadingDiv.innerHTML = '<strong>AI:</strong> <em>Sorry, an error occurred while processing your question.</em>';
+            }
+            
+            log.scrollTop = log.scrollHeight;
+        }
+    </script>
     </body>
     </html>
     '''
+    
+    # Combine the HTML content and script
+    html = html_content + script_part
     return HTMLResponse(html)
 
 @app.post("/ask")
@@ -515,28 +579,28 @@ def home():
                 // Add user message with styling
                 const userDiv = document.createElement('div');
                 userDiv.className = 'user-message';
-                userDiv.innerHTML = `<strong>You:</strong> ${txt}`;
+                userDiv.innerHTML = '<strong>You:</strong> ' + txt;
                 log.appendChild(userDiv);
                 
                 // Show loading indicator
                 const loadingDiv = document.createElement('div');
                 loadingDiv.className = 'ai-message';
-                loadingDiv.innerHTML = `<strong>AI:</strong> <em>Thinking...</em>`;
+                loadingDiv.innerHTML = '<strong>AI:</strong> <em>Thinking...</em>';
                 log.appendChild(loadingDiv);
                 
                 try {
                     const res = await fetch('/ask', {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        headers: {'Content-Type':'application/json'},
                         body: JSON.stringify({question: txt})
                     });
                     
                     const data = await res.json();
                     
                     // Replace loading indicator with actual response
-                    loadingDiv.innerHTML = `<strong>AI:</strong> ${data.answer}`;
+                    loadingDiv.innerHTML = '<strong>AI:</strong> ' + data.answer;
                 } catch (error) {
-                    loadingDiv.innerHTML = `<strong>AI:</strong> <em>Sorry, an error occurred while processing your question.</em>`;
+                    loadingDiv.innerHTML = '<strong>AI:</strong> <em>Sorry, an error occurred while processing your question.</em>';
                 }
                 
                 log.scrollTop = log.scrollHeight;
