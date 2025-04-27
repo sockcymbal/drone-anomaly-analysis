@@ -113,7 +113,7 @@ def qa_llm(context_json: str, question: str) -> str:
             {"role":"user", 
              "content":f"Context (drone anomaly data):\n{context_json}\n\nQuestion:\n{question}"}
         ],
-        temperature=0.7  # Slightly lower temperature for more focused answers
+        temperature=1  # Slightly lower temperature for more focused answers
     )
     return resp.choices[0].message.content.strip()
 
