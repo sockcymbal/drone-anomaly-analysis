@@ -191,10 +191,22 @@ def analyse(df_raw: pd.DataFrame):
     briefs=[]
     for _,r in worst.iterrows():
         b = brief_llm(r.drone_id,r)
-        briefs.append({"id":r.drone_id,"votes":int(r.votes),"ts":r.ts,
-                       "summary":b["summary"],"action":b["action"],
-                       "pilot_dist":f"{r.pilot_dist_m:.0f} m",
-                       "speed":f"{r.speed_mps:.1f} m/s"})
+        briefs.append({
+            "id": r.drone_id,
+            "votes": int(r.votes),
+            "ts": r.ts,
+            "summary": b["summary"],
+            "action": b["action"],
+            "priority": b.get("priority", 0),  # Extract priority (use 0 as default for sorting)
+            "threat_profile": b.get("threat_profile", "Unknown threat type"),  # Extract threat profile
+            "rationale": b.get("rationale", []),  # Extract rationale list
+            "contingency": b.get("contingency", ""),  # Extract contingency plan
+            "pilot_dist": f"{r.pilot_dist_m:.0f} m",
+            "speed": f"{r.speed_mps:.1f} m/s"
+        })
+    
+    # Sort briefs by priority (highest first)
+    briefs.sort(key=lambda x: (0 if isinstance(x["priority"], str) else int(x["priority"])), reverse=True)
 
     ctx_json = json.dumps(briefs, default=str, indent=2)
 
@@ -327,6 +339,7 @@ async def analyze(file: UploadFile = File(...)):
                     <button type="submit"><i class="fas fa-paper-plane"></i> Ask</button>
                 </form>
                 <div id="log"></div>
+                <p><a href="/docs" style="color: #3498db;"><i class="fas fa-book"></i> Read detailed technical documentation</a> about our anomaly detection algorithms.</p>
             </div>
             
             <div class="action-buttons">
@@ -397,6 +410,157 @@ def download():
     path = cache.get("csv")
     if not path: return HTMLResponse("No CSV",404)
     return FileResponse(path, filename="annotated.csv")
+
+@app.get("/docs")
+def docs():
+    """Provide detailed documentation about the anomaly detection tests."""
+    return HTMLResponse("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Drone Anomaly Detection: Technical Documentation</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css" rel="stylesheet">
+        <style>
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                margin: 0;
+                padding: 0;
+                background-color: #f5f7fa;
+                color: #2c3e50;
+                line-height: 1.6;
+            }
+            .container {
+                max-width: 900px;
+                margin: 0 auto;
+                padding: 30px 20px;
+            }
+            h1 {
+                color: #2c3e50;
+                border-bottom: 3px solid #3498db;
+                padding-bottom: 10px;
+                margin-bottom: 30px;
+            }
+            h2 {
+                color: #34495e;
+                margin-top: 30px;
+                border-left: 4px solid #3498db;
+                padding-left: 10px;
+            }
+            .test-card {
+                background-color: white;
+                border-radius: 8px;
+                padding: 20px;
+                margin-bottom: 20px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            }
+            .test-card h3 {
+                color: #2980b9;
+                margin-top: 0;
+            }
+            .back-btn {
+                display: inline-block;
+                background-color: #95a5a6;
+                color: white;
+                text-decoration: none;
+                padding: 10px 15px;
+                border-radius: 4px;
+                font-weight: bold;
+                margin-top: 20px;
+            }
+            .back-btn:hover {
+                background-color: #7f8c8d;
+            }
+            code {
+                background-color: #f8f9fa;
+                padding: 2px 4px;
+                border-radius: 3px;
+                font-family: monospace;
+                color: #e74c3c;
+            }
+            .test-group {
+                border-left: 3px solid #2ecc71;
+                padding-left: 15px;
+                margin: 30px 0;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1><i class="fas fa-shield-alt"></i> Drone Anomaly Detection System</h1>
+            <p>This documentation explains the technical details of the six anomaly detection tests used in our system to identify suspicious drone behavior.</p>
+            
+            <div class="test-group">
+                <h2>Core Anomaly Detection Tests</h2>
+                
+                <div class="test-card">
+                    <h3><i class="fas fa-ruler-horizontal"></i> Distance Test</h3>
+                    <p><strong>Description:</strong> Flags drones operating beyond visual line of sight (BVLOS) limits.</p>
+                    <p><strong>Implementation:</strong> Calculates geodesic distance between drone and pilot positions using pyproj.</p>
+                    <p><strong>Threshold:</strong> <code>pilot_dist_m > 2000</code> - Flags drones more than 2km from their pilot, which often exceeds legal VLOS requirements.</p>
+                    <p><strong>Significance:</strong> BVLOS operations typically require special authorization and may indicate unauthorized usage.</p>
+                </div>
+                
+                <div class="test-card">
+                    <h3><i class="fas fa-tachometer-alt"></i> Speed Test</h3>
+                    <p><strong>Description:</strong> Identifies drones operating at abnormally high speeds.</p>
+                    <p><strong>Implementation:</strong> Monitors the <code>speed_mps</code> value and compares against threshold.</p>
+                    <p><strong>Threshold:</strong> <code>speed_mps > 50</code> - Flags drones exceeding 50 m/s (~180 km/h), which is beyond typical consumer drone capabilities.</p>
+                    <p><strong>Significance:</strong> Unusually high speeds may indicate military-grade equipment, modified consumer drones, or sensor errors.</p>
+                </div>
+                
+                <div class="test-card">
+                    <h3><i class="fas fa-redo"></i> Turn Rate Test</h3>
+                    <p><strong>Description:</strong> Detects erratic flight patterns with abnormally rapid turns.</p>
+                    <p><strong>Implementation:</strong> Calculates rate of bearing change in degrees per second.</p>
+                    <p><strong>Threshold:</strong> <code>turn_rate_deg_s.abs() > 90</code> - Flags drones making turns faster than 90 degrees per second.</p>
+                    <p><strong>Significance:</strong> Rapid directional changes may indicate evasive maneuvers, aggressive flying, or loss of control.</p>
+                </div>
+            </div>
+            
+            <div class="test-group">
+                <h2>Advanced Statistical Methods</h2>
+                
+                <div class="test-card">
+                    <h3><i class="fas fa-chart-line"></i> Burst Detection</h3>
+                    <p><strong>Description:</strong> Identifies sudden changes in flight behavior patterns.</p>
+                    <p><strong>Implementation:</strong> Uses the ruptures library with KernelCPD (change point detection) algorithm on distance data.</p>
+                    <p><strong>Algorithm:</strong> <code>ruptures.KernelCPD(kernel="linear")</code> to detect significant shifts in time series data.</p>
+                    <p><strong>Significance:</strong> Sudden changes in distance patterns may indicate a change in mission, evasive behavior, or hand-off between operators.</p>
+                </div>
+                
+                <div class="test-card">
+                    <h3><i class="fas fa-braille"></i> Cluster Analysis</h3>
+                    <p><strong>Description:</strong> Uses density-based clustering to identify spatial outliers.</p>
+                    <p><strong>Implementation:</strong> HDBSCAN (Hierarchical Density-Based Spatial Clustering of Applications with Noise) on standardized features.</p>
+                    <p><strong>Features used:</strong> <code>["speed_mps", "turn_rate_deg_s", "pilot_dist_m"]</code> with StandardScaler normalization.</p>
+                    <p><strong>Parameters:</strong> <code>min_cluster_size=10, min_samples=5</code></p>
+                    <p><strong>Significance:</strong> Points labeled as noise (-1) represent multivariate statistical outliers across multiple dimensions.</p>
+                </div>
+                
+                <div class="test-card">
+                    <h3><i class="fas fa-tree"></i> Isolation Forest</h3>
+                    <p><strong>Description:</strong> Machine learning algorithm specialized for anomaly detection.</p>
+                    <p><strong>Implementation:</strong> sklearn's IsolationForest on the same feature set as cluster analysis.</p>
+                    <p><strong>Parameters:</strong> <code>contamination=0.05, random_state=42</code></p>
+                    <p><strong>Threshold:</strong> <code>decision_function(feats) < -0.15</code></p>
+                    <p><strong>Significance:</strong> Adds weight to the anomaly vote by detecting points that can be easily isolated through recursive feature partitioning.</p>
+                </div>
+            </div>
+            
+            <div class="test-card">
+                <h3><i class="fas fa-vote-yea"></i> Composite Scoring System</h3>
+                <p><strong>Description:</strong> Multi-factor voting system that combines results from all tests.</p>
+                <p><strong>Implementation:</strong> <code>df["votes"] = df[test_cols].sum(axis=1) + df.iso_flag.astype(int)</code></p>
+                <p><strong>Scoring:</strong> Each failed test adds one vote to the anomaly score. Higher scores indicate more suspicious behavior.</p>
+                <p><strong>Analysis:</strong> The LLM assesses the full context including vote count to assign priority levels (1-5) and recommend appropriate actions.</p>
+            </div>
+            
+            <a href="/" class="back-btn"><i class="fas fa-arrow-left"></i> Back to Home</a>
+        </div>
+    </body>
+    </html>
+    """)
 
 @app.get("/")
 def home():
@@ -545,14 +709,211 @@ def home():
             
             <div class="divider"></div>
             
+            <div class="features-section">
+                <h2><i class="fas fa-list"></i> System Features</h2>
+                <ul class="feature-list">
+                    <li>Advanced anomaly detection using 6 specialized tests (distance, speed, turn rate, burst detection, clustering, and machine learning)</li>
+                    <li>AI-powered analysis of drone behavior patterns</li>
+                    <li>Detailed threat assessment with priority levels</li>
+                    <li>Interactive visualization of drone flight paths</li>
+                    <li>Downloadable annotated results for further analysis</li>
+                </ul>
+            </div>
+        </div>
+        
+        <script>
+            async function send(){
+                const txt=document.getElementById('q').value;
+                document.getElementById('q').value='';
+                if(!txt) return;
+                const log=document.getElementById('log');
+                
+                // Add user message with styling
+                const userDiv = document.createElement('div');
+                userDiv.className = 'user-message';
+                userDiv.innerHTML = '<strong>You:</strong> ' + txt;
+                log.appendChild(userDiv);
+                
+                // Show loading indicator
+                const loadingDiv = document.createElement('div');
+                loadingDiv.className = 'ai-message';
+                loadingDiv.innerHTML = '<strong>AI:</strong> <em>Thinking...</em>';
+                log.appendChild(loadingDiv);
+                
+                try {
+                    const res = await fetch('/ask', {
+                        method: 'POST',
+                        headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({question: txt})
+                    });
+                    
+                    const data = await res.json();
+                    
+                    // Replace loading indicator with actual response
+                    loadingDiv.innerHTML = '<strong>AI:</strong> ' + data.answer;
+                } catch (error) {
+                    loadingDiv.innerHTML = '<strong>AI:</strong> <em>Sorry, an error occurred while processing your question.</em>';
+                }
+                
+                log.scrollTop = log.scrollHeight;
+            }
+        </script>
+    </body>
+    </html>
+    """)
+
+@app.get("/analyze")
+def analyze():
+    return HTMLResponse("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Drone Anomaly Detection</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css" rel="stylesheet">
+        <style>
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                margin: 0;
+                padding: 0;
+                background-color: #f5f7fa;
+                color: #2c3e50;
+            }
+            .container {
+                max-width: 900px;
+                margin: 0 auto;
+                padding: 30px 20px;
+            }
+            h1 {
+                color: #2c3e50;
+                border-bottom: 3px solid #3498db;
+                padding-bottom: 10px;
+                margin-bottom: 30px;
+            }
+            h2 {
+                color: #34495e;
+                margin-top: 30px;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            h2:before {
+                content: '';
+                width: 20px;
+                height: 20px;
+                background-color: #3498db;
+                display: inline-block;
+                border-radius: 50%;
+                text-align: center;
+                color: white;
+                line-height: 20px;
+                font-size: 14px;
+            }
+            .upload-section, .chat-section {
+                background-color: white;
+                border-radius: 8px;
+                padding: 25px;
+                margin-bottom: 30px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            }
+            .form-group {
+                margin-bottom: 15px;
+            }
+            input[type="file"] {
+                border: 1px solid #dce4ec;
+                padding: 10px;
+                border-radius: 4px;
+                width: 100%;
+                max-width: 400px;
+                background-color: #fafafa;
+            }
+            button {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-weight: bold;
+                transition: background-color 0.3s;
+            }
+            button:hover {
+                background-color: #2980b9;
+            }
+            #q {
+                width: 100%;
+                padding: 12px;
+                border: 1px solid #dce4ec;
+                border-radius: 4px;
+                font-size: 16px;
+                margin-bottom: 10px;
+            }
+            #log {
+                background-color: #f8f9fa;
+                border: 1px solid #dce4ec;
+                border-radius: 4px;
+                padding: 15px;
+                height: 300px;
+                overflow-y: auto;
+                font-family: monospace;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                margin-top: 15px;
+            }
+            .user-message {
+                color: #2c3e50;
+                margin-bottom: 10px;
+            }
+            .ai-message {
+                color: #27ae60;
+                margin-bottom: 15px;
+                border-left: 3px solid #27ae60;
+                padding-left: 10px;
+            }
+            .divider {
+                height: 1px;
+                background-color: #ecf0f1;
+                margin: 30px 0;
+            }
+            .feature-list {
+                margin-top: 20px;
+                padding-left: 20px;
+            }
+            .feature-list li {
+                margin-bottom: 8px;
+                list-style-type: none;
+                position: relative;
+                padding-left: 25px;
+            }
+            .feature-list li:before {
+                content: '✓';
+                position: absolute;
+                left: 0;
+                color: #27ae60;
+                font-weight: bold;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1><i class="fas fa-drone"></i> Drone Anomaly Detection System</h1>
+            
+            <div class="upload-section">
+                <h2><i class="fas fa-upload"></i> Upload Drone Telemetry Data</h2>
+                <p>Upload a CSV file containing drone telemetry data for analysis.</p>
+                <form action="/analyze" method="post" enctype="multipart/form-data" class="form-group">
+                    <input type="file" name="file" accept=".csv">
+                    <button type="submit"><i class="fas fa-chart-line"></i> Analyze Data</button>
+                </form>
+            </div>
+            
+            <div class="divider"></div>
+            
             <div class="chat-section">
                 <h2><i class="fas fa-comments"></i> Ask Follow-up Questions</h2>
                 <p>Ask questions about the analysis results and get AI-powered insights.</p>
-                <form id="chat" onsubmit="send(); return false;">
-                    <input id="q" placeholder="e.g., Which drone is the highest priority?" autocomplete="off">
-                    <button type="submit"><i class="fas fa-paper-plane"></i> Ask</button>
-                </form>
-                <div id="log"></div>
+                <h2>2  Ask follow-up questions</h2>
+                <p><em>Note: This feature will be available after analyzing data.</em></p>
             </div>
             
             <div class="divider"></div>
@@ -560,7 +921,7 @@ def home():
             <div class="features-section">
                 <h2><i class="fas fa-list"></i> System Features</h2>
                 <ul class="feature-list">
-                    <li>Advanced anomaly detection using multiple tests</li>
+                    <li>Advanced anomaly detection using 6 specialized tests (distance, speed, turn rate, burst detection, clustering, and machine learning)</li>
                     <li>AI-powered analysis of drone behavior patterns</li>
                     <li>Detailed threat assessment with priority levels</li>
                     <li>Interactive visualization of drone flight paths</li>
